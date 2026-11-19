@@ -1,0 +1,57 @@
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright';
+
+const baseURL = process.env.TEST_BASE_URL ?? 'http://localhost:3107';
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
+try {
+  const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const a = await desktop.newPage();
+  const b = await mobile.newPage();
+  const errors = [];
+  for (const page of [a,b]) page.on('pageerror', error => errors.push(error.message));
+  await a.goto(baseURL);
+  await a.getByRole('heading', { name: 'Exemple : Week-end à Lisbonne' }).waitFor();
+  if (process.env.SCREENSHOT_PATH) await a.screenshot({ path: process.env.SCREENSHOT_PATH, fullPage: true });
+  await a.getByRole('button', { name: 'Nouveau groupe' }).first().click();
+  await a.getByLabel('Nom du groupe').fill('Weekend de test');
+  await a.getByLabel('Participants', { exact: true }).fill('Alice\nBob\nCélia');
+  await a.getByRole('button', { name: 'Créer le groupe', exact: true }).click();
+  await a.getByRole('heading', { name: 'Weekend de test' }).waitFor();
+  assert.match(a.url(), /#g=[A-Za-z0-9_-]{43}$/);
+  await a.getByRole('button', { name: 'Ajouter une dépense', exact: true }).click();
+  await a.getByLabel('Intitulé').fill('Pizzas et glaces');
+  await a.getByLabel('Montant', { exact: true }).fill('40,00');
+  await a.getByLabel('Répartition', { exact: true }).selectOption('custom');
+  await a.getByLabel('Part de Alice').fill('10');
+  await a.getByLabel('Part de Bob').fill('20');
+  await a.getByLabel('Part de Célia').fill('10');
+  await a.getByRole('button', { name: 'Enregistrer la dépense' }).click();
+  await a.getByText('Pizzas et glaces', { exact: true }).waitFor();
+  await a.getByRole('button', { name: 'Partager', exact: true }).click();
+  const invite = await a.getByLabel('Lien du groupe').inputValue();
+  assert.equal(invite, a.url());
+  await b.goto(invite);
+  await b.getByText('Pizzas et glaces', { exact: true }).waitFor();
+  assert.equal(await b.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Pas de défilement horizontal sur mobile');
+  await b.getByRole('button', { name: 'Équilibre', exact: true }).click();
+  await b.getByText('Bob → Alice', { exact: true }).waitFor();
+  await b.getByRole('button', { name: 'Enregistrer le remboursement Bob vers Alice' }).click();
+  const token = new URL(invite).hash.slice(3);
+  const headers = { Authorization: `Bearer ${token}` };
+  const groupApi = new URL('/api/group', baseURL).href;
+  const { group } = await (await a.request.get(groupApi, { headers })).json();
+  assert.equal((await a.request.patch(groupApi, { headers, data: { version: group.version, action: { type: 'member.add', name: 'Dina' } } })).status(), 200);
+  await b.getByRole('button', { name: 'Confirmer le remboursement' }).click();
+  await b.getByRole('alert').filter({ hasText: 'modifié entre-temps' }).waitFor();
+  await b.getByRole('dialog').waitFor({ state: 'hidden' });
+  await b.getByRole('button', { name: 'Enregistrer le remboursement Bob vers Alice' }).click();
+  await b.getByRole('button', { name: 'Confirmer le remboursement' }).click();
+  await b.getByText('Bob → Alice', { exact: true }).waitFor({ state: 'hidden' });
+  await b.reload();
+  await b.getByText('Remboursement', { exact: true }).waitFor();
+  assert.deepEqual(errors, []);
+  console.log('Parcours validé : création, partage, dépense personnalisée, conflit concurrent, remboursement, persistance et largeur mobile.');
+} finally {
+  await browser.close();
+}
